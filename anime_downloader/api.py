@@ -87,6 +87,11 @@ async def id(id: str):
             "message": "In progression...",
             "progress": value / current.duration,
         }
+    return {
+        "status": "done",
+        "message": "You can now download the file.",
+        "download_link": f"/get-file?id={id}",
+    }
 
 
 @app.get("/get-file")
