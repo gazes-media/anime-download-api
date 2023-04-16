@@ -64,7 +64,7 @@ async def get_m3u8(url: str) -> Context:
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError as e:
-                print(raw)
+                print("Something waw wrong with this json :", raw)
                 raise e
 
             url = next(
@@ -82,7 +82,6 @@ async def get_available_qualities(ctx: Context) -> dict[str, str]:
     response = await client.get(ctx.url)
 
     if not response.text.startswith("#EXTM3U"):
-        print(response.text)
         raise ValueError("Not a m3u8 file")
 
     lines = iter(response.text.splitlines())
@@ -96,22 +95,22 @@ async def get_available_qualities(ctx: Context) -> dict[str, str]:
     return qualities
 
 
-async def download_form_m3u8(url: str, output: str) -> subprocess.Popen[bytes]:
-    filename = os.path.basename(output)
+async def download_form_m3u8(
+    url: str, output: str
+) -> tuple[subprocess.Popen[bytes], float]:
+    filename = os.path.splitext(os.path.basename(output))[0]
     if not os.path.exists("./tmp"):
         os.mkdir("./tmp")
 
     with open(f"./tmp/{filename}.m3u8", "wb") as f:
         response = await client.get(url)
-        print(f"{response.status_code} {response.content}")
-        print(response.content)
-        content = response.content
-        f.write(content)  # worker is already set
+        f.write(response.content)  # worker is already set
+        total_duration = sum(map(float, re.findall(r"#EXTINF:([\d.]+)", response.text)))
 
     args = [
         "ffmpeg",
         "-progress",
-        "progress.txt",
+        f"./tmp/{filename}-progress.txt",
         "-y",  # overwrite output file
         "-protocol_whitelist",
         "file,http,https,tcp,tls,crypto",
@@ -132,4 +131,4 @@ async def download_form_m3u8(url: str, output: str) -> subprocess.Popen[bytes]:
         args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
 
-    return process
+    return process, total_duration
