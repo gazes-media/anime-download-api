@@ -7,8 +7,6 @@ services:
       dockerfile: Dockerfile
     container_name: proxy
     restart: always
-    ports:
-      - "2545:2545"
     expose:
       - "2545"
   animedl:
@@ -19,5 +17,3 @@ services:
     restart: always
     ports:
       - "8000:8000"
-    volumes:
-      - ./:/app
