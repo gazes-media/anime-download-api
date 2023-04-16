@@ -1,0 +1,23 @@
+version: '3'
+
+services:
+  proxy:
+    build: 
+      context: ./dockerfiles/proxy
+      dockerfile: Dockerfile
+    container_name: proxy
+    restart: always
+    ports:
+      - "2545:2545"
+    expose:
+      - "2545"
+  animedl:
+    build: 
+      context: .
+      dockerfile: ./dockerfiles/animedl/Dockerfile
+    container_name: animedl
+    restart: always
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./:/app
