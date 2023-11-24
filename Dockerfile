@@ -4,5 +4,4 @@ ENV PYTHONUNBUFFERED=0
 COPY requirements.txt ./
 RUN pip install -r requirements.txt && apk add ffmpeg
 COPY ./src .
-RUN ls
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8080", "--reload"]
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8080"]
