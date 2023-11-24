@@ -1,6 +1,7 @@
+# FILE NOT MAINTAINED
+
 import base64
 import json
-import os
 import re
 import subprocess
 from typing import Any, NamedTuple
@@ -9,8 +10,7 @@ from urllib.parse import urlparse, urlunparse
 import httpx
 from bs4 import BeautifulSoup
 
-from .constants import BASE_URL
-from .utils import set_worker
+from constants import BASE_URL
 
 VIDEO_REGEX = re.compile(r"video\[0\] = '(.+)';", re.MULTILINE)
 M3U8_REGEX = [
@@ -20,7 +20,7 @@ M3U8_REGEX = [
 ]
 M3U8_RES = re.compile(r"#EXT-X-STREAM-INF:.+RESOLUTION=(\d+x\d+).+")
 
-client = httpx.AsyncClient()
+client = httpx.Client()
 
 
 class Context(NamedTuple):
@@ -28,27 +28,24 @@ class Context(NamedTuple):
     subtitles: str | None
 
 
-async def get_m3u8(url: str) -> Context:
+def get_m3u8(url: str) -> Context:
     url_split: list[Any] = list(urlparse(url))
     url_split[1] = BASE_URL
     episode_url: str = urlunparse(url_split)  # type: ignore
 
-    response = await client.get(episode_url)
+    response = client.get(episode_url)
 
     if not (match := VIDEO_REGEX.search(response.text)):
         raise ValueError("No source found")
 
-    response = await client.get(set_worker(match.group(1)))
+    response = client.get(set_worker(match.group(1)))
     soup = BeautifulSoup(response.text, features="html.parser")
 
     scripts = soup.find_all("script")
     sources = [script["src"] for script in scripts if script.get("src")]
 
     for src in sources:
-        try:
-            script_content = (await client.get(set_worker(src))).text
-        except httpx.HTTPError as e:
-            continue
+        script_content = client.get(set_worker(src)).text
         b64_m3u8: str | None = None
         for regex in M3U8_REGEX:
             if match := regex.search(script_content):
@@ -64,7 +61,7 @@ async def get_m3u8(url: str) -> Context:
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError as e:
-                print("Something waw wrong with this json :", raw)
+                print(raw)
                 raise e
 
             url = next(
@@ -78,10 +75,10 @@ async def get_m3u8(url: str) -> Context:
     raise ValueError("No m3u8 found")
 
 
-async def get_available_qualities(ctx: Context) -> dict[str, str]:
-    response = await client.get(ctx.url)
-
+def get_available_qualities(ctx: Context) -> dict[str, str]:
+    response = client.get(ctx.url)
     if not response.text.startswith("#EXTM3U"):
+        print(response.text)
         raise ValueError("Not a m3u8 file")
 
     lines = iter(response.text.splitlines())
@@ -95,27 +92,25 @@ async def get_available_qualities(ctx: Context) -> dict[str, str]:
     return qualities
 
 
-async def download_form_m3u8(
-    url: str, output: str
-) -> tuple[subprocess.Popen[bytes], float]:
-    filename = os.path.splitext(os.path.basename(output))[0]
-    if not os.path.exists("./tmp"):
-        os.mkdir("./tmp")
-
-    with open(f"./tmp/{filename}.m3u8", "wb") as f:
-        response = await client.get(url)
-        f.write(response.content)  # worker is already set
-        total_duration = sum(map(float, re.findall(r"#EXTINF:([\d.]+)", response.text)))
+def download_form_m3u8(
+    url: str,
+    output: str,
+    stdout: Any = subprocess.DEVNULL,
+    stderr: Any = subprocess.DEVNULL,
+) -> subprocess.Popen[bytes]:
+    with open("./tmp.m3u8", "wb") as f:
+        content = client.get(url).content
+        f.write(content)  # worker is already set
 
     args = [
         "ffmpeg",
         "-progress",
-        f"./tmp/{filename}-progress.txt",
+        "progress.txt",
         "-y",  # overwrite output file
         "-protocol_whitelist",
         "file,http,https,tcp,tls,crypto",
         "-i",
-        f"./tmp/{filename}.m3u8",
+        "./tmp.m3u8",
         "-bsf:a",
         "aac_adtstoasc",
         "-c",
@@ -127,8 +122,6 @@ async def download_form_m3u8(
         output,
     ]
 
-    process = subprocess.Popen(
-        args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
+    process = subprocess.Popen(args, stdout=stdout, stderr=stderr)
 
-    return process, total_duration
+    return process
