@@ -1,4 +1,4 @@
-<img src="https://bannermd.airopi.dev/banner?title=Discord%20M3U%20stream&desc=Stream%20M3U%20videos%20inside%20Discord&repo=gazes-media/anime-dl" width="100%" alt="banner"/>
+<img src="https://bannermd.airopi.dev/banner?title=Discord%20M3U%20stream&desc=Stream%20M3U%20videos%20inside%20Discord&repo=AiroPi/m3u-discord-stream" width="100%" alt="banner"/>
 
 <p align="center">
   <a href="https://www.buymeacoffee.com/airopi" target="_blank">
