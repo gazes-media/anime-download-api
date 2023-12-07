@@ -147,7 +147,7 @@ async def download(
         task.add_done_callback(partial(discard, download))
 
     response_json: dict[str, Any] = {
-        "status": str(download.status),
+        "status": download.status.value,
         "id": download.id,
         "result": None,
     }
