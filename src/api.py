@@ -181,15 +181,20 @@ async def result(id: str, request: Request):
     if download is None or download.status is not Status.DONE:
         return Response(status_code=404, content="Link expired, not ready or invalid.")
 
+    if "animecat.net" not in download.image_url:
+        image_url = download.image_url
+    else:
+        image_url = "https://gazes.fr/icon/android/android-launchericon-512-512.png"
+
     response = (
         '<meta name="twitter:card" content="player">\n'
+        '<meta property="og:image" content="{image_url}">\n'
+        '<meta property="og:type" content="video.other">\n'
+        '<meta property="og:video:url" content="{video_url}">\n'
         '<meta name="twitter:player" content="{video_url}">\n'
         '<meta name="twitter:player:stream" content="{video_url}">\n'
         '<meta name="twitter:image" content="{image_url}">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-        '<meta property="og:image" content="{image_url}">\n'
-        '<meta property="og:type" content="video.other">\n'
-        '<meta property="og:video:url" content="{video_url}">\n'
         '<meta property="og:video:width" content="{width}">\n'
         '<meta property="og:video:height" content="{height}">\n'
         '<meta name="twitter:player:width" content="{width}">\n'
@@ -199,7 +204,7 @@ async def result(id: str, request: Request):
         video_url=f"/result/video/{id}.mp4",
         width=download.width,
         height=download.height,
-        image_url=download.image_url,
+        image_url=image_url,
     )
 
     return HTMLResponse(response)
