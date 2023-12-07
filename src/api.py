@@ -13,7 +13,7 @@ from typing import Any, BinaryIO, Literal, cast
 import aiofiles
 from aiofiles import os
 from fastapi import FastAPI, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from async_downloader import download_form_m3u8, get_available_qualities
 from download_cache import DownloadCache
@@ -137,7 +137,7 @@ async def download(url: str, quality: Quality = Quality.HIGH):
     }
 
     if download.status is Status.DONE:
-        response_json.update({"result": f"/result/{download.id}.mp4"})
+        response_json.update({"result": f"/result/{download.id}"})
         return response_json
     if download.status is Status.ERROR:
         response_json.update({"message": str(download.error_message)})
@@ -159,8 +159,29 @@ async def download(url: str, quality: Quality = Quality.HIGH):
     return response_json
 
 
-@app.get("/result/{id}.mp4")
+@app.get("/result/{id}")
 async def result(id: str, request: Request):
+    template = (
+        '<meta name="twitter:card" content="player">\n'
+        '<meta name="twitter:player" content="{video_url}">\n'
+        '<meta name="twitter:player:stream" content="{video_url}">\n'
+        '<meta name="twitter:image" content="https://upload.wikimedia.org/wikipedia/commons/thumb/4/49/A_black_image.jpg/640px-A_black_image.jpg">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        '<meta property="og:image" content="https://upload.wikimedia.org/wikipedia/commons/thumb/4/49/A_black_image.jpg/640px-A_black_image.jpg">\n'
+        '<meta property="og:type" content="video.other">\n'
+        '<meta property="og:video:url" content="{video_url}">\n'
+        '<meta property="og:video:width" content="{width}">\n'
+        '<meta property="og:video:height" content="{height}">\n'
+        '<meta name="twitter:player:width" content="{width}">\n'
+        '<meta name="twitter:player:height" content="{height}">\n'
+    )
+    return HTMLResponse(
+        template.format(video_url=f"{request.base_url}result/video/{id}.mp4")
+    )
+
+
+@app.get("/result/video/{id}.mp4")
+async def serve_video(id: str, request: Request):
     if (download := cached_downloads.get(id)) is None:
         return Response(status_code=404, content="Link expired or invalid.")
 
