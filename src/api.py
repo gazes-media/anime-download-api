@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import partial
 from pathlib import Path
-from turtle import width
 from typing import Any, BinaryIO, Literal, cast
 
 import aiofiles
