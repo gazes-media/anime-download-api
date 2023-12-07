@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from aiofiles import os
 
 if TYPE_CHECKING:
-    from api import Download, Quality
+    from api import Download, QualityInput
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ class DownloadCache:
         if await os.path.exists(f"./tmp/{id_}.m3u8"):
             await os.remove(f"./tmp/{id_}.m3u8")
 
-    def get_from_url(self, url: str, quality: Quality) -> Download | None:
+    def get_from_url(self, url: str, quality: QualityInput) -> Download | None:
         for download in self._cache:
             if download.origin_url == url and download.quality == quality:
                 self.update(download)

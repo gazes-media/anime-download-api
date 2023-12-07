@@ -7,7 +7,9 @@ from typing import NamedTuple
 import aiofiles
 import httpx
 
-M3U8_RES = re.compile(r"#EXT-X-STREAM-INF:.+RESOLUTION=(\d+x\d+).+")
+M3U8_RES = re.compile(
+    r"#EXT-X-STREAM-INF:.+RESOLUTION=(?P<width>\d+)x(?P<height>\d+).+"
+)
 
 client = httpx.AsyncClient()
 
@@ -17,7 +19,13 @@ class Context(NamedTuple):
     subtitles: str | None
 
 
-async def get_available_qualities(url: str) -> dict[str, str]:
+class Quality(NamedTuple):
+    url: str
+    width: int
+    height: int
+
+
+async def get_available_qualities(url: str) -> list[Quality]:
     response = await client.get(url)
 
     if not response.text.startswith("#EXTM3U"):
@@ -25,12 +33,12 @@ async def get_available_qualities(url: str) -> dict[str, str]:
 
     lines = iter(response.text.splitlines())
     next(lines)
-    qualities: dict[str, str] = {}
+    qualities: list[Quality] = []
     for line in lines:
         if line.startswith("#EXT"):
             if match := M3U8_RES.search(line):
-                quality = match.group(1)
-                qualities[quality] = next(lines)
+                width, height = map(int, match.groups())
+                qualities.append(Quality(url=next(lines), width=width, height=height))
     return qualities
 
 

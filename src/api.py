@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import partial
 from pathlib import Path
+from turtle import width
 from typing import Any, BinaryIO, Literal, cast
 
 import aiofiles
@@ -15,7 +16,7 @@ from aiofiles import os
 from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
-from async_downloader import download_form_m3u8, get_available_qualities
+from async_downloader import Quality, download_form_m3u8, get_available_qualities
 from download_cache import DownloadCache
 
 CHUNK_SIZE = 1024 * 1024
@@ -33,7 +34,7 @@ class Status(Enum):
     ERROR = "error"
 
 
-class Quality(Enum):
+class QualityInput(Enum):
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
@@ -43,7 +44,7 @@ class Quality(Enum):
 class Download:
     id: str
     origin_url: str
-    quality: Quality
+    quality: QualityInput
     status: Status
     process: asyncio.subprocess.Process
     last_access: dt.datetime
@@ -52,6 +53,8 @@ class Download:
     remaining_time: float | None = None
     error_message: str | None = None
     task: asyncio.Task[Any] | None = None
+    width: int
+    height: int
 
     def __eq__(self, __value: object) -> bool:
         if not isinstance(__value, Download):
@@ -93,7 +96,7 @@ async def startup_event():
 
 
 @app.get("/download")
-async def download(url: str, quality: Quality = Quality.HIGH):
+async def download(url: str, quality: QualityInput = QualityInput.HIGH):
     url_parts = urllib.parse.urlsplit(url)
     url_parts._replace(query=f"url={urllib.parse.quote(url_parts.query[4:])}")
     url = f"{url_parts.scheme}://{url_parts.netloc}{url_parts.path}?url={urllib.parse.quote(url_parts.query[4:])}"
@@ -102,18 +105,20 @@ async def download(url: str, quality: Quality = Quality.HIGH):
         id = str(uuid.uuid4())
 
         qualities = await get_available_qualities(url)
-        qualities = tuple(qualities.values())
+        qualities = sorted(qualities, key=lambda q: q.width * q.height)
 
-        video_url: str
+        video_quality: Quality
         match quality:
-            case Quality.HIGH:
-                video_url = qualities[0]
-            case Quality.MEDIUM:
-                video_url = qualities[len(qualities) // 2]
-            case Quality.LOW:
-                video_url = qualities[-1]
+            case QualityInput.HIGH:
+                video_quality = qualities[0]
+            case QualityInput.MEDIUM:
+                video_quality = qualities[len(qualities) // 2]
+            case QualityInput.LOW:
+                video_quality = qualities[-1]
 
-        process, duration = await download_form_m3u8(video_url, f"./tmp/{id}.mp4")
+        process, duration = await download_form_m3u8(
+            video_quality.url, f"./tmp/{id}.mp4"
+        )
         download = Download(
             id=id,
             origin_url=url,
@@ -122,6 +127,8 @@ async def download(url: str, quality: Quality = Quality.HIGH):
             last_access=dt.datetime.now(),
             process=process,
             total_seconds=duration,
+            width=video_quality.width,
+            height=video_quality.height,
         )
         await cached_downloads.add(download)
 
@@ -161,7 +168,11 @@ async def download(url: str, quality: Quality = Quality.HIGH):
 
 @app.get("/result/{id}")
 async def result(id: str, request: Request):
-    template = (
+    download = cached_downloads.get(id)
+    if download is None or download.status is not Status.DONE:
+        return Response(status_code=404, content="Link expired, not ready or invalid.")
+
+    response = (
         '<meta name="twitter:card" content="player">\n'
         '<meta name="twitter:player" content="{video_url}">\n'
         '<meta name="twitter:player:stream" content="{video_url}">\n'
@@ -174,10 +185,13 @@ async def result(id: str, request: Request):
         '<meta property="og:video:height" content="{height}">\n'
         '<meta name="twitter:player:width" content="{width}">\n'
         '<meta name="twitter:player:height" content="{height}">\n'
+    ).format(
+        video_url=f"{request.base_url}result/video/{id}.mp4",
+        width=download.width,
+        height=download.height,
     )
-    return HTMLResponse(
-        template.format(video_url=f"{request.base_url}result/video/{id}.mp4")
-    )
+
+    return HTMLResponse(response)
 
 
 @app.get("/result/video/{id}.mp4")
