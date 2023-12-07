@@ -25,6 +25,26 @@ class Quality(NamedTuple):
     height: int
 
 
+class M3U8(NamedTuple):
+    url: str
+    image_url: str
+
+
+async def get_m3u8_url(anime_id: int, episode: int, lang: str) -> M3U8:
+    url = f"https://api.gazes.fr/anime/animes/{anime_id}/{episode}"
+    response = (await client.get(url)).json()
+    if response["success"] != True:
+        raise ValueError(response["message"])
+
+    data = response["data"].get(lang)
+    if data is None:
+        raise ValueError(
+            f"Language {lang} is not available for anime {anime_id} and episode {episode}"
+        )
+
+    return M3U8(url=data["videoUri"], image_url=data["url_image"])
+
+
 async def get_available_qualities(url: str) -> list[Quality]:
     response = await client.get(url)
 

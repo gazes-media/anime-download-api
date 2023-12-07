@@ -2,7 +2,6 @@ import asyncio
 import datetime as dt
 import glob
 import logging
-import urllib.parse
 import uuid
 from dataclasses import dataclass
 from enum import Enum
@@ -15,7 +14,12 @@ from aiofiles import os
 from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
-from async_downloader import Quality, download_form_m3u8, get_available_qualities
+from async_downloader import (
+    Quality,
+    download_form_m3u8,
+    get_available_qualities,
+    get_m3u8_url,
+)
 from download_cache import DownloadCache
 
 CHUNK_SIZE = 1024 * 1024
@@ -42,7 +46,10 @@ class QualityInput(Enum):
 @dataclass(kw_only=True)
 class Download:
     id: str
-    origin_url: str
+    anime_id: int
+    episode: int
+    lang: str
+    image_url: str
     quality: QualityInput
     status: Status
     process: asyncio.subprocess.Process
@@ -94,16 +101,16 @@ async def startup_event():
     background_tasks.add(asyncio.create_task(cached_downloads.cleaner()))
 
 
-@app.get("/download")
-async def download(url: str, quality: QualityInput = QualityInput.HIGH):
-    url_parts = urllib.parse.urlsplit(url)
-    url_parts._replace(query=f"url={urllib.parse.quote(url_parts.query[4:])}")
-    url = f"{url_parts.scheme}://{url_parts.netloc}{url_parts.path}?url={urllib.parse.quote(url_parts.query[4:])}"
-
-    if (download := cached_downloads.get_from_url(url, quality)) is None:
+@app.get("/download/{anime_id}/{episode}/{lang}")
+async def download(
+    anime_id: int, episode: int, lang: str, quality: QualityInput = QualityInput.HIGH
+):
+    download = cached_downloads.retrieve(anime_id, episode, lang, quality)
+    if download is None:
+        m3u8 = await get_m3u8_url(anime_id, episode, lang)
         id = str(uuid.uuid4())
 
-        qualities = await get_available_qualities(url)
+        qualities = await get_available_qualities(m3u8.url)
         qualities = sorted(qualities, key=lambda q: q.width * q.height)
 
         video_quality: Quality
@@ -120,7 +127,10 @@ async def download(url: str, quality: QualityInput = QualityInput.HIGH):
         )
         download = Download(
             id=id,
-            origin_url=url,
+            anime_id=anime_id,
+            episode=episode,
+            lang=lang,
+            image_url=m3u8.image_url,
             quality=quality,
             status=Status.STARTED,
             last_access=dt.datetime.now(),
@@ -175,9 +185,9 @@ async def result(id: str, request: Request):
         '<meta name="twitter:card" content="player">\n'
         '<meta name="twitter:player" content="{video_url}">\n'
         '<meta name="twitter:player:stream" content="{video_url}">\n'
-        '<meta name="twitter:image" content="https://upload.wikimedia.org/wikipedia/commons/thumb/4/49/A_black_image.jpg/640px-A_black_image.jpg">\n'
+        '<meta name="twitter:image" content="{image_url}">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-        '<meta property="og:image" content="https://upload.wikimedia.org/wikipedia/commons/thumb/4/49/A_black_image.jpg/640px-A_black_image.jpg">\n'
+        '<meta property="og:image" content="{image_url}">\n'
         '<meta property="og:type" content="video.other">\n'
         '<meta property="og:video:url" content="{video_url}">\n'
         '<meta property="og:video:width" content="{width}">\n'
@@ -189,6 +199,7 @@ async def result(id: str, request: Request):
         video_url=f"/result/video/{id}.mp4",
         width=download.width,
         height=download.height,
+        image_url=download.image_url,
     )
 
     return HTMLResponse(response)

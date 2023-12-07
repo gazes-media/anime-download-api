@@ -62,9 +62,16 @@ class DownloadCache:
         if await os.path.exists(f"./tmp/{id_}.m3u8"):
             await os.remove(f"./tmp/{id_}.m3u8")
 
-    def get_from_url(self, url: str, quality: QualityInput) -> Download | None:
+    def retrieve(
+        self, anime_id: int, episode: int, lang: str, quality: QualityInput
+    ) -> Download | None:
         for download in self._cache:
-            if download.origin_url == url and download.quality == quality:
+            if (
+                download.anime_id == anime_id
+                and download.episode == episode
+                and download.lang == lang
+                and download.quality == quality
+            ):
                 self.update(download)
                 return download
         return None
