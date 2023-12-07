@@ -1,14 +1,18 @@
 import asyncio
+import datetime as dt
 import glob
-import os
-import subprocess
+import logging
 import urllib.parse
 import uuid
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass
 from enum import Enum
+from functools import partial
 from pathlib import Path
-from typing import Any, BinaryIO, Literal
+from typing import Any, BinaryIO, Literal, cast
 
+import aiofiles
+from aiofiles import os
 from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -17,6 +21,8 @@ from async_downloader import download_form_m3u8, get_available_qualities
 CHUNK_SIZE = 1024 * 1024
 
 app = FastAPI()
+
+logger = logging.getLogger(__name__)
 
 
 class Status(Enum):
@@ -38,34 +44,132 @@ class Download:
     origin_url: str
     quality: Quality
     status: Status
-    process: subprocess.Popen[bytes] | None = None
-    tasks: list[asyncio.Task[None]] = field(default_factory=list)
-    total_seconds: float | None = None
+    process: asyncio.subprocess.Process
+    last_access: dt.datetime
+    total_seconds: float
     seconds_processed: float = 0
+    remaining_time: float | None = None
+    error_message: str | None = None
+    task: asyncio.Task[Any] | None = None
+
+    def __eq__(self, __value: object) -> bool:
+        if not isinstance(__value, Download):
+            return False
+        return self.id == __value.id
+
+    def __hash__(self) -> int:
+        return hash(self.id)
 
     @property
     def progress(self) -> float | None:
-        if self.total_seconds is None:
-            return None
-        return round((self.seconds_processed / self.total_seconds * 100), 2)
+        return self.seconds_processed / self.total_seconds
 
     @property
     def video_path(self) -> Path:
         return Path(f"./tmp/{self.id}.mp4")
 
+    @property
+    def expiration_time(self) -> float:
+        return (
+            self.last_access - dt.datetime.now() + dt.timedelta(minutes=0, seconds=10)
+        ).total_seconds()
 
-cached_downloads: dict[str, Download] = {}
+    @property
+    def expired(self) -> float:
+        return self.expiration_time < 0
 
 
-def get_download(url: str, quality: Quality) -> Download | None:
-    for download in cached_downloads.values():
-        if download.origin_url == url and download.quality == quality:
-            return download
-    return None
+class DownloadCache:
+    def __init__(self) -> None:
+        self._maxlen = 20
+        self._cache: deque[Download] = deque(maxlen=self._maxlen)
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    def __iter__(self) -> Any:
+        return iter(self._cache)
+
+    def update(self, value: Download) -> None:
+        self._cache.remove(value)
+        self._cache.append(value)
+        value.last_access = dt.datetime.now()
+
+    def get(self, id: str) -> Download | None:
+        value = next((dl for dl in self._cache if dl.id == id), None)
+        if value is not None:
+            self.update(value)
+        return value
+
+    async def add(self, value: Download) -> None:
+        if self._maxlen <= len(self._cache):
+            value = self._cache.popleft()
+            await self.clean(value)
+
+        value.last_access = dt.datetime.now()
+        self._cache.append(value)
+
+    async def remove(self, value: Download) -> None:
+        self._cache.remove(value)
+        await self.clean(value)
+
+    async def clean(self, value: Download) -> None:
+        if value.process.returncode is None:
+            value.process.terminate()
+        if value.task is not None:
+            value.task.cancel()
+
+        id_ = value.id
+        if await os.path.exists(f"./tmp/{id_}.mp4"):
+            await os.remove(f"./tmp/{id_}.mp4")
+        if await os.path.exists(f"./tmp/{id_}-progress.txt"):
+            await os.remove(f"./tmp/{id_}-progress.txt")
+        if await os.path.exists(f"./tmp/{id_}.m3u8"):
+            await os.remove(f"./tmp/{id_}.m3u8")
+
+    def get_from_url(self, url: str, quality: Quality) -> Download | None:
+        for download in self._cache:
+            if download.origin_url == url and download.quality == quality:
+                self.update(download)
+                return download
+        return None
+
+    async def cleaner(self):
+        logger.info("Starting cleaner")
+        while True:
+            if len(self) and self._cache[0].expired:
+                download = self._cache.popleft()
+                await self.clean(download)
+                logger.info(f"{download.id} removed from cache.")
+
+            print(max((dl.expiration_time for dl in self), default=2), flush=True)
+            await asyncio.sleep(max((dl.expiration_time for dl in self), default=2))
 
 
-for file in glob.glob("./tmp/*"):
-    os.remove(file)
+cached_downloads = DownloadCache()
+background_tasks: set[asyncio.Task[Any]] = set()
+
+
+def discard(download: Download, task: asyncio.Task[Any]):
+    if task.cancelled():
+        return
+    if task.exception() is not None:
+        download.status = Status.ERROR
+        download.error_message = str(task.exception())
+    background_tasks.discard(task)
+    download.task = None
+
+
+@app.on_event("startup")
+async def startup_event():
+    if not await os.path.exists("./tmp"):
+        await os.mkdir("./tmp")
+
+    logger.info("Cleaning up tmp folder")
+    for file in glob.glob("./tmp/*"):
+        await os.remove(file)
+
+    background_tasks.add(asyncio.create_task(cached_downloads.cleaner()))
 
 
 @app.get("/download")
@@ -74,11 +178,8 @@ async def download(url: str, quality: Quality = Quality.HIGH):
     url_parts._replace(query=f"url={urllib.parse.quote(url_parts.query[4:])}")
     url = f"{url_parts.scheme}://{url_parts.netloc}{url_parts.path}?url={urllib.parse.quote(url_parts.query[4:])}"
 
-    if (download := get_download(url, quality)) is None:
+    if (download := cached_downloads.get_from_url(url, quality)) is None:
         id = str(uuid.uuid4())
-        download = cached_downloads[id] = Download(
-            id=id, origin_url=url, quality=quality, status=Status.STARTED
-        )
 
         qualities = await get_available_qualities(url)
         qualities = tuple(qualities.values())
@@ -93,9 +194,21 @@ async def download(url: str, quality: Quality = Quality.HIGH):
                 video_url = qualities[-1]
 
         process, duration = await download_form_m3u8(video_url, f"./tmp/{id}.mp4")
-        download.process = process
-        download.total_seconds = duration
-        download.tasks.append(asyncio.create_task(download_task(download)))
+        download = Download(
+            id=id,
+            origin_url=url,
+            quality=quality,
+            status=Status.STARTED,
+            last_access=dt.datetime.now(),
+            process=process,
+            total_seconds=duration,
+        )
+        await cached_downloads.add(download)
+
+        task = asyncio.create_task(download_task(download))
+        download.task = task
+        background_tasks.add(task)
+        task.add_done_callback(partial(discard, download))
 
     response_json: dict[str, Any] = {
         "status": str(download.status),
@@ -103,20 +216,24 @@ async def download(url: str, quality: Quality = Quality.HIGH):
         "result": None,
     }
 
-    for task in download.tasks:
-        if task.done():
-            download.tasks.remove(task)
-            if (e := task.exception()) is not None:
-                download.status = Status.ERROR
-                response_json.update({"message": str(e)})
-
     if download.status is Status.DONE:
         response_json.update({"result": f"/result?id={download.id}"})
         return response_json
     if download.status is Status.ERROR:
+        response_json.update({"message": str(download.error_message)})
+        await cached_downloads.remove(download)
         return JSONResponse(status_code=500, content=response_json)
     if download.status is Status.IN_PROGRESS:
-        response_json.update({"progress": download.progress})
+        response_json.update(
+            {
+                "progress": round(download.progress * 100, 2)
+                if download.progress
+                else None,
+                "estimated_remaining_time": round(download.remaining_time, 2)
+                if download.remaining_time
+                else None,
+            }
+        )
         return response_json
 
     return response_json
@@ -130,39 +247,52 @@ async def result(id: str, request: Request):
     if download.status is not Status.DONE:
         return Response(status_code=425, content="Conversion not finished.")
 
-    return range_requests_response(request, download.video_path, "video/mp4")
+    return await range_requests_response(request, download.video_path, "video/mp4")
 
 
 async def download_task(download: Download) -> None:
     download.status = Status.IN_PROGRESS
-    process = download.process
-    if process is None or download.total_seconds is None:
-        return
 
-    while process.poll() is None:
-        if (progress := check_progression(f"./tmp/{download.id}-progress.txt")) is None:
+    async def update_download():
+        start_time = dt.datetime.now()
+        while True:
             await asyncio.sleep(1)
-            continue
-        if progress == "end":
-            download.status = Status.DONE
-            break
-        download.status = Status.IN_PROGRESS
-        download.seconds_processed = progress
-        await asyncio.sleep(1)
+            seconds_processed = await check_progression(
+                f"./tmp/{download.id}-progress.txt"
+            )
+            if seconds_processed is None:
+                continue
 
-    if process.poll() == 0:
+            if seconds_processed == "end":
+                break
+
+            download.status = Status.IN_PROGRESS
+            download.seconds_processed = seconds_processed
+            progress = cast(float, download.progress)
+            delta = dt.datetime.now() - start_time
+            if progress > 0:
+                download.remaining_time = (
+                    delta.total_seconds() / progress - delta.total_seconds()
+                )
+
+    task = asyncio.create_task(update_download())
+    await download.process.wait()
+    print("Process finished", flush=True)
+    task.cancel()
+
+    if download.process.returncode == 0:
         download.status = Status.DONE
     else:
         download.status = Status.ERROR
 
 
-def check_progression(file: str) -> float | Literal["end"] | None:
-    if not os.path.exists(file):
+async def check_progression(file: str) -> float | Literal["end"] | None:
+    if not await os.path.exists(file):
         return None
-    with open(file, "r") as f:
+    async with aiofiles.open(file, "r") as f:
         # Seek to the end of the file
-        f.seek(0, 2)
-        end_pos = f.tell()
+        await f.seek(0, 2)
+        end_pos = await f.tell()
 
         def analyze_line(line: str) -> float | Literal["end"] | None:
             if line.startswith("progress=") and line.endswith("end"):
@@ -173,8 +303,8 @@ def check_progression(file: str) -> float | Literal["end"] | None:
 
         line: list[str] = []
         for pos in range(end_pos - 1, -1, -1):
-            f.seek(pos, 0)
-            char = f.read(1)
+            await f.seek(pos, 0)
+            char = await f.read(1)
             if char == "\n":
                 result = analyze_line("".join(reversed(line)))
                 if result is not None:
@@ -217,10 +347,12 @@ def _get_range_header(range_header: str, file_size: int) -> tuple[int, int]:
     return start, end
 
 
-def range_requests_response(request: Request, file_path: str | Path, content_type: str):
+async def range_requests_response(
+    request: Request, file_path: str | Path, content_type: str
+):
     """Returns StreamingResponse using Range Requests of a given file"""
 
-    file_size = os.stat(file_path).st_size
+    file_size = (await os.stat(file_path)).st_size
     range_header = request.headers.get("range")
 
     headers = {
@@ -249,22 +381,3 @@ def range_requests_response(request: Request, file_path: str | Path, content_typ
         headers=headers,
         status_code=status_code,
     )
-
-
-def clean_up(id: str):
-    if os.path.exists(f"./tmp/{id}.m3u8"):
-        os.remove(f"./{id}.m3u8")
-    if os.path.exists(f"./tmp/{id}.mp4"):
-        os.remove(f"./tmp/{id}.mp4")
-
-
-# async def watcher(id: str):
-#     process_state = current_processes[id]
-#     while process_state.process is None:
-#         await asyncio.sleep(1)
-
-#     await asyncio.get_event_loop().run_in_executor(
-#         None, process_state.process.wait, 10 * 60
-#     )
-#     await asyncio.sleep(10 * 60)
-#     await asyncio.get_event_loop().run_in_executor(None, clean_up, id)
