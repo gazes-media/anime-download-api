@@ -185,10 +185,11 @@ async def result(id: str, request: Request):
         '<meta name="twitter:player:width" content="{width}">\n'
         '<meta name="twitter:player:height" content="{height}">\n'
     ).format(
-        video_url=f"{request.base_url}result/video/{id}.mp4",
+        video_url=f"{request.headers.get('referer')}result/video/{id}.mp4",
         width=download.width,
         height=download.height,
     )
+    print(request.headers.get("referer"))
 
     return HTMLResponse(response)
 
