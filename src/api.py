@@ -185,11 +185,10 @@ async def result(id: str, request: Request):
         '<meta name="twitter:player:width" content="{width}">\n'
         '<meta name="twitter:player:height" content="{height}">\n'
     ).format(
-        video_url=f"{request.headers.get('referer')}result/video/{id}.mp4",
+        video_url=f"https://animedl.airopi.dev/result/video/{id}.mp4",  # TODO : use the requested domain name
         width=download.width,
         height=download.height,
     )
-    print(request.headers.get("referer"))
 
     return HTMLResponse(response)
 
