@@ -184,8 +184,9 @@ async def result(id: str, request: Request):
         '<meta property="og:video:height" content="{height}">\n'
         '<meta name="twitter:player:width" content="{width}">\n'
         '<meta name="twitter:player:height" content="{height}">\n'
+        '<meta http-equiv="refresh" content="0;URL={video_url}">'
     ).format(
-        video_url=f"{request.base_url}result/video/{id}.mp4",
+        video_url=f"/result/video/{id}.mp4",
         width=download.width,
         height=download.height,
     )
