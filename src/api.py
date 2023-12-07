@@ -4,7 +4,6 @@ import glob
 import logging
 import urllib.parse
 import uuid
-from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from functools import partial
@@ -17,12 +16,14 @@ from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from async_downloader import download_form_m3u8, get_available_qualities
+from download_cache import DownloadCache
 
 CHUNK_SIZE = 1024 * 1024
 
 app = FastAPI()
-
 logger = logging.getLogger(__name__)
+cached_downloads = DownloadCache()
+background_tasks: set[asyncio.Task[Any]] = set()
 
 
 class Status(Enum):
@@ -71,93 +72,12 @@ class Download:
     @property
     def expiration_time(self) -> float:
         return (
-            self.last_access - dt.datetime.now() + dt.timedelta(minutes=0, seconds=10)
+            self.last_access - dt.datetime.now() + dt.timedelta(hours=12)
         ).total_seconds()
 
     @property
     def expired(self) -> float:
         return self.expiration_time < 0
-
-
-class DownloadCache:
-    def __init__(self) -> None:
-        self._maxlen = 20
-        self._cache: deque[Download] = deque(maxlen=self._maxlen)
-
-    def __len__(self) -> int:
-        return len(self._cache)
-
-    def __iter__(self) -> Any:
-        return iter(self._cache)
-
-    def update(self, value: Download) -> None:
-        self._cache.remove(value)
-        self._cache.append(value)
-        value.last_access = dt.datetime.now()
-
-    def get(self, id: str) -> Download | None:
-        value = next((dl for dl in self._cache if dl.id == id), None)
-        if value is not None:
-            self.update(value)
-        return value
-
-    async def add(self, value: Download) -> None:
-        if self._maxlen <= len(self._cache):
-            value = self._cache.popleft()
-            await self.clean(value)
-
-        value.last_access = dt.datetime.now()
-        self._cache.append(value)
-
-    async def remove(self, value: Download) -> None:
-        self._cache.remove(value)
-        await self.clean(value)
-
-    async def clean(self, value: Download) -> None:
-        if value.process.returncode is None:
-            value.process.terminate()
-        if value.task is not None:
-            value.task.cancel()
-
-        id_ = value.id
-        if await os.path.exists(f"./tmp/{id_}.mp4"):
-            await os.remove(f"./tmp/{id_}.mp4")
-        if await os.path.exists(f"./tmp/{id_}-progress.txt"):
-            await os.remove(f"./tmp/{id_}-progress.txt")
-        if await os.path.exists(f"./tmp/{id_}.m3u8"):
-            await os.remove(f"./tmp/{id_}.m3u8")
-
-    def get_from_url(self, url: str, quality: Quality) -> Download | None:
-        for download in self._cache:
-            if download.origin_url == url and download.quality == quality:
-                self.update(download)
-                return download
-        return None
-
-    async def cleaner(self):
-        logger.info("Starting cleaner")
-        while True:
-            if len(self) and self._cache[0].expired:
-                download = self._cache.popleft()
-                await self.clean(download)
-                logger.info(f"{download.id} removed from cache.")
-
-            print(max((dl.expiration_time for dl in self), default=2), flush=True)
-            await asyncio.sleep(max((dl.expiration_time for dl in self), default=2))
-
-
-cached_downloads = DownloadCache()
-background_tasks: set[asyncio.Task[Any]] = set()
-
-
-def discard(download: Download, task: asyncio.Task[Any]):
-    if task.cancelled():
-        return
-    if task.exception() is not None:
-        download.status = Status.ERROR
-        download.error_message = str(task.exception())
-    background_tasks.discard(task)
-    download.task = None
 
 
 @app.on_event("startup")
@@ -248,6 +168,16 @@ async def result(id: str, request: Request):
         return Response(status_code=425, content="Conversion not finished.")
 
     return await range_requests_response(request, download.video_path, "video/mp4")
+
+
+def discard(download: Download, task: asyncio.Task[Any]):
+    if task.cancelled():
+        return
+    if task.exception() is not None:
+        download.status = Status.ERROR
+        download.error_message = str(task.exception())
+    background_tasks.discard(task)
+    download.task = None
 
 
 async def download_task(download: Download) -> None:
