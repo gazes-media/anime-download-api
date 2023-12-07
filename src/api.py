@@ -137,7 +137,7 @@ async def download(url: str, quality: Quality = Quality.HIGH):
     }
 
     if download.status is Status.DONE:
-        response_json.update({"result": f"/result?id={download.id}"})
+        response_json.update({"result": f"/result/{download.id}.mp4"})
         return response_json
     if download.status is Status.ERROR:
         response_json.update({"message": str(download.error_message)})
@@ -159,7 +159,7 @@ async def download(url: str, quality: Quality = Quality.HIGH):
     return response_json
 
 
-@app.get("/result")
+@app.get("/result/{id}.mp4")
 async def result(id: str, request: Request):
     if (download := cached_downloads.get(id)) is None:
         return Response(status_code=404, content="Link expired or invalid.")
