@@ -258,7 +258,6 @@ async def download_task(download: Download) -> None:
 
     task = asyncio.create_task(update_download())
     await download.process.wait()
-    print("Process finished", flush=True)
     task.cancel()
 
     if download.process.returncode == 0:
