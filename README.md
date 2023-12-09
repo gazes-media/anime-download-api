@@ -12,12 +12,12 @@ The goal of this project is to be able to stream a M3U files inside a Discord vi
 
 The current solution consist on an API, that download the episode in a tmp directory to serve it using og: metadata to make a working episode player inside Discord. This involve that we have to wait before being able to play a video. See [an eventual better solution](./FUTURE.md).
 
-This API consist on 1 endpoint:
-`https://mp4.gazes.fr/download/{anime_id}/{episode}`
+This API consist on 1 endpoint:  
+`https://mp4.gazes.fr/download/{anime_id}/{episode}/{lang}`
 
-It will return a link to the file when ready:
-`https://mp4.gazes.fr/result/{download_id}`
-And the actual file is available at:
+It will return a link to the file when ready:  
+`https://mp4.gazes.fr/result/{download_id}`  
+And the actual file is available at:  
 `https://mp4.gazes.fr/video/{download_id}.mp4`
 
 ## Support, Feedback and Community
