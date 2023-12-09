@@ -84,4 +84,4 @@ class DownloadCache:
                 await self.clean(download)
                 logger.info(f"{download.id} removed from cache.")
 
-            await asyncio.sleep(max((dl.expiration_time for dl in self), default=60))
+            await asyncio.sleep(max((dl.expiration_time for dl in self), default=1200))

@@ -23,14 +23,20 @@ from async_downloader import (
 from download_cache import DownloadCache
 
 CHUNK_SIZE = 1024 * 1024
+DOWNLOAD_EXPIRATION_TIME = 60 * 60 * 12  # 12 hours
 
 app = FastAPI()
 logger = logging.getLogger(__name__)
 cached_downloads = DownloadCache()
-background_tasks: set[asyncio.Task[Any]] = set()
+
+
+# Set a strong ref to the task so the garbage collector doesn't delete it.
+cleaner_task: asyncio.Task[Any] | None = None
 
 
 class Status(Enum):
+    """Status related to a download."""
+
     STARTED = "started"
     IN_PROGRESS = "in_progress"
     DONE = "done"
@@ -38,6 +44,8 @@ class Status(Enum):
 
 
 class QualityInput(Enum):
+    """Only used for an API query since it doesn't support Literal[]."""
+
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
@@ -45,7 +53,34 @@ class QualityInput(Enum):
 
 @dataclass(kw_only=True)
 class Download:
-    id: str
+    """
+    The Download object aims to be cached in memory.
+    It will contains all the information related to a download.
+
+    Ths task attribute is used to cancel the task if the download is removed from the cache. Otherwise this
+    argument is useless. It also allows to keep a strong ref to the task so the garbage collector doesn't delete it.
+
+    The error_message attribute is used to store the exception message if the download failed. At the first time
+    a download is accessed after it failed, it is removed from the cache, so the next access will restart the download.
+
+    Here is the workflow of a download:
+    - The user requests a download.
+    - The download is searched in the cache.
+        - If it is found:
+            - the state is IN_PROGRESS : return the progression and the estimated remaining time.
+            - the state is DONE : return the link to the video.
+            - the state is ERROR : return the error message, then remove the download from the cache.
+        - If it is not found:
+            - Get the episode m3u8 url.
+            - Get the available qualities.
+            - Choose the quality according to the user's choice. HIGH by default.
+            - Starts an FFMPEG subprocess to download the video.
+            - Starts a task to update the download progression (refreshed every second).
+            - Add the download to the cache.
+            - Return the state STARTED.
+    """
+
+    id: str  # a random uuid
     anime_id: int
     episode: int
     lang: str
@@ -54,7 +89,7 @@ class Download:
     status: Status
     process: asyncio.subprocess.Process
     last_access: dt.datetime
-    total_seconds: float
+    total_seconds: float  # duration of the video
     seconds_processed: float = 0
     remaining_time: float | None = None
     error_message: str | None = None
@@ -80,8 +115,11 @@ class Download:
 
     @property
     def expiration_time(self) -> float:
+        """Get the time in seconds before the download expires."""
         return (
-            self.last_access - dt.datetime.now() + dt.timedelta(hours=12)
+            self.last_access
+            - dt.datetime.now()
+            + dt.timedelta(seconds=DOWNLOAD_EXPIRATION_TIME)
         ).total_seconds()
 
     @property
@@ -91,6 +129,8 @@ class Download:
 
 @app.on_event("startup")
 async def startup_event():
+    global cleaner_task
+
     if not await os.path.exists("./tmp"):
         await os.mkdir("./tmp")
 
@@ -98,13 +138,14 @@ async def startup_event():
     for file in glob.glob("./tmp/*"):
         await os.remove(file)
 
-    background_tasks.add(asyncio.create_task(cached_downloads.cleaner()))
+    cleaner_task = asyncio.create_task(cached_downloads.cleaner())
 
 
 @app.get("/download/{anime_id}/{episode}/{lang}")
 async def download(
     anime_id: int, episode: int, lang: str, quality: QualityInput = QualityInput.HIGH
 ):
+    """Download an episode of an anime. See Download class for more information."""
     download = cached_downloads.retrieve(anime_id, episode, lang, quality)
     if download is None:
         m3u8 = await get_m3u8_url(anime_id, episode, lang)
@@ -113,6 +154,7 @@ async def download(
         qualities = await get_available_qualities(m3u8.url)
         qualities = sorted(qualities, key=lambda q: q.width * q.height)
 
+        # HIGH is the best quality, LOW the worst, MEDIUM is one in the middle. Two qualities can be the same.
         video_quality: Quality
         match quality:
             case QualityInput.HIGH:
@@ -143,7 +185,6 @@ async def download(
 
         task = asyncio.create_task(download_task(download))
         download.task = task
-        background_tasks.add(task)
         task.add_done_callback(partial(discard, download))
 
     response_json: dict[str, Any] = {
@@ -176,11 +217,16 @@ async def download(
 
 
 @app.get("/result/{id}")
-async def result(id: str, request: Request):
+async def result(id: str):
+    """
+    Return an HTML page with the video and the image as meta tags. The meta tags are used by Twitter and Discord
+    to display a video player.
+    """
     download = cached_downloads.get(id)
     if download is None or download.status is not Status.DONE:
         return Response(status_code=404, content="Link expired, not ready or invalid.")
 
+    # The default image can't be loaded by Discord
     if "animecat.net" not in download.image_url:
         image_url = download.image_url
     else:
@@ -222,16 +268,23 @@ async def serve_video(id: str, request: Request):
 
 
 def discard(download: Download, task: asyncio.Task[Any]):
+    """
+    This function handle errors to set the ERROR status and the error message.
+    This should not happen, but it is just to be safe.
+    """
+    download.task = None
     if task.cancelled():
         return
     if task.exception() is not None:
         download.status = Status.ERROR
         download.error_message = str(task.exception())
-    background_tasks.discard(task)
-    download.task = None
 
 
 async def download_task(download: Download) -> None:
+    """
+    This task will upgrade the Download object to set the progression, the remaining time and the status.
+    It will also wait for the FFMPEG subprocess to finish and set the status to DONE or ERROR.
+    """
     download.status = Status.IN_PROGRESS
 
     async def update_download():
@@ -267,6 +320,10 @@ async def download_task(download: Download) -> None:
 
 
 async def check_progression(file: str) -> float | Literal["end"] | None:
+    """
+    This function reads a progress file generated by ffmpeg by seeking to the end of the file and reading it
+    backwards. It returns the last progression found or None if the file doesn't exist yet.
+    """
     if not await os.path.exists(file):
         return None
     async with aiofiles.open(file, "r") as f:
