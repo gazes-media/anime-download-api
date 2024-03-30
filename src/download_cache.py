@@ -4,6 +4,8 @@ import asyncio
 import datetime as dt
 import logging
 from collections import deque
+from os import environ
+from pprint import pprint
 from typing import TYPE_CHECKING, Any
 
 from aiofiles import os
@@ -14,9 +16,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# LEFT RIGHT
 class DownloadCache:
     def __init__(self) -> None:
-        self._maxlen = 20
+        # nb: the maximum size can be exceeded during less than 10s
+        # nb: expiration time can be exceeded during less than 10s
+        self._maxlen = int(environ.get("MAX_ELEMENTS", 40))
+        self._maxsize = int(environ.get("MAX_SIZE", 15)) * 1024**3  # max size in GiB
         self._cache: deque[Download] = deque(maxlen=self._maxlen)
 
     def __len__(self) -> int:
@@ -26,8 +32,9 @@ class DownloadCache:
         return iter(self._cache)
 
     def update(self, value: Download) -> None:
+        """Update will put the value to the top of the right of the queue, and reset its access time."""
         self._cache.remove(value)
-        self._cache.append(value)
+        self._cache.append(value)  # right
         value.last_access = dt.datetime.now()
 
     def get(self, id: str) -> Download | None:
@@ -36,13 +43,21 @@ class DownloadCache:
             self.update(value)
         return value
 
+    async def _pop(self) -> None:
+        old = self._cache.popleft()
+        await self.clean(old)
+        logger.info("%s removed from cache.", str(old.id))
+
     async def add(self, value: Download) -> None:
         if self._maxlen <= len(self._cache):
-            value = self._cache.popleft()
-            await self.clean(value)
+            await self._pop()
+
+        while self._maxsize < sum(d.size for d in self._cache):
+            await self._pop()
 
         value.last_access = dt.datetime.now()
         self._cache.append(value)
+        pprint(list(self._cache))
 
     async def remove(self, value: Download) -> None:
         self._cache.remove(value)
@@ -62,9 +77,7 @@ class DownloadCache:
         if await os.path.exists(f"./tmp/{id_}.m3u8"):
             await os.remove(f"./tmp/{id_}.m3u8")
 
-    def retrieve(
-        self, anime_id: int, episode: int, lang: str, quality: QualityInput
-    ) -> Download | None:
+    def retrieve(self, anime_id: int, episode: int, lang: str, quality: QualityInput) -> Download | None:
         for download in self._cache:
             if (
                 download.anime_id == anime_id
@@ -77,11 +90,12 @@ class DownloadCache:
         return None
 
     async def cleaner(self):
-        logger.info("Starting cleaner")
+        """Check every 10s the maximum size is not exceeded"""
         while True:
             if len(self) and self._cache[0].expired:
-                download = self._cache.popleft()
-                await self.clean(download)
-                logger.info(f"{download.id} removed from cache.")
+                await self._pop()
 
-            await asyncio.sleep(max((dl.expiration_time for dl in self), default=1200))
+            while self._maxsize < sum(d.size for d in self._cache):
+                await self._pop()
+
+            await asyncio.sleep(10)

@@ -2,7 +2,8 @@ version: '3'
 
 services:
   animedl:
-    build: 
+    init: true
+    build:
       context: .
     container_name: animedl
     restart: always

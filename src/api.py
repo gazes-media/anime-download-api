@@ -7,10 +7,11 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import partial
 from pathlib import Path
-from typing import Any, BinaryIO, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import aiofiles
 from aiofiles import os
+from aiofiles.threadpool.binary import AsyncBufferedReader
 from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
@@ -22,8 +23,14 @@ from async_downloader import (
 )
 from download_cache import DownloadCache
 
+if TYPE_CHECKING:
+    from aiofiles.base import AiofilesContextManager
+    from aiofiles.threadpool.binary import AsyncBufferedReader
+
+    type AsyncOpen = AiofilesContextManager[None, None, AsyncBufferedReader]
+
 CHUNK_SIZE = 1024 * 1024
-DOWNLOAD_EXPIRATION_TIME = 60 * 60 * 12  # 12 hours
+DOWNLOAD_EXPIRATION_TIME = 30  # 60 * 60 * 12  # 12 hours
 
 app = FastAPI()
 logger = logging.getLogger(__name__)
@@ -116,15 +123,19 @@ class Download:
     @property
     def expiration_time(self) -> float:
         """Get the time in seconds before the download expires."""
-        return (
-            self.last_access
-            - dt.datetime.now()
-            + dt.timedelta(seconds=DOWNLOAD_EXPIRATION_TIME)
-        ).total_seconds()
+        return (self.last_access - dt.datetime.now() + dt.timedelta(seconds=DOWNLOAD_EXPIRATION_TIME)).total_seconds()
 
     @property
     def expired(self) -> float:
         return self.expiration_time < 0
+
+    @property
+    def size(self) -> int:
+        """Return the size of the file, in bytes."""
+        path = Path(f"./tmp/{self.id}.mp4")
+        if path.exists():
+            return path.stat().st_size
+        return 0
 
 
 @app.on_event("startup")
@@ -142,9 +153,7 @@ async def startup_event():
 
 
 @app.get("/download/{anime_id}/{episode}/{lang}")
-async def download(
-    anime_id: int, episode: int, lang: str, quality: QualityInput = QualityInput.HIGH
-):
+async def download(anime_id: int, episode: int, lang: str, quality: QualityInput = QualityInput.HIGH):
     """Download an episode of an anime. See Download class for more information."""
     download = cached_downloads.retrieve(anime_id, episode, lang, quality)
     if download is None:
@@ -164,9 +173,7 @@ async def download(
             case QualityInput.LOW:
                 video_quality = qualities[-1]
 
-        process, duration = await download_form_m3u8(
-            video_quality.url, f"./tmp/{id}.mp4"
-        )
+        process, duration = await download_form_m3u8(video_quality.url, f"./tmp/{id}.mp4")
         download = Download(
             id=id,
             anime_id=anime_id,
@@ -203,12 +210,8 @@ async def download(
     if download.status is Status.IN_PROGRESS:
         response_json.update(
             {
-                "progress": round(download.progress * 100, 2)
-                if download.progress
-                else None,
-                "estimated_remaining_time": round(download.remaining_time, 2)
-                if download.remaining_time
-                else None,
+                "progress": round(download.progress * 100, 2) if download.progress else None,
+                "estimated_remaining_time": round(download.remaining_time, 2) if download.remaining_time else None,
             }
         )
         return response_json
@@ -291,9 +294,7 @@ async def download_task(download: Download) -> None:
         start_time = dt.datetime.now()
         while True:
             await asyncio.sleep(1)
-            seconds_processed = await check_progression(
-                f"./tmp/{download.id}-progress.txt"
-            )
+            seconds_processed = await check_progression(f"./tmp/{download.id}-progress.txt")
             if seconds_processed is None:
                 continue
 
@@ -305,9 +306,7 @@ async def download_task(download: Download) -> None:
             progress = cast(float, download.progress)
             delta = dt.datetime.now() - start_time
             if progress > 0:
-                download.remaining_time = (
-                    delta.total_seconds() / progress - delta.total_seconds()
-                )
+                download.remaining_time = delta.total_seconds() / progress - delta.total_seconds()
 
     task = asyncio.create_task(update_download())
     await download.process.wait()
@@ -351,18 +350,16 @@ async def check_progression(file: str) -> float | Literal["end"] | None:
                 line.append(char)
 
 
-def send_bytes_range_requests(
-    file_obj: BinaryIO, start: int, end: int, chunk_size: int = 10_000
-):
+async def send_bytes_range_requests(file_obj: AsyncOpen, start: int, end: int, chunk_size: int = 10_000):
     """Send a file in chunks using Range Requests specification RFC7233
 
     `start` and `end` parameters are inclusive due to specification
     """
-    with file_obj as f:
-        f.seek(start)
-        while (pos := f.tell()) <= end:
+    async with file_obj as f:
+        await f.seek(start)
+        while (pos := await f.tell()) <= end:
             read_size = min(chunk_size, end + 1 - pos)
-            yield f.read(read_size)
+            yield await f.read(read_size)
 
 
 def _get_range_header(range_header: str, file_size: int) -> tuple[int, int]:
@@ -384,9 +381,7 @@ def _get_range_header(range_header: str, file_size: int) -> tuple[int, int]:
     return start, end
 
 
-async def range_requests_response(
-    request: Request, file_path: str | Path, content_type: str
-):
+async def range_requests_response(request: Request, file_path: str | Path, content_type: str):
     """Returns StreamingResponse using Range Requests of a given file"""
 
     file_size = (await os.stat(file_path)).st_size
@@ -398,8 +393,7 @@ async def range_requests_response(
         "content-encoding": "identity",
         "content-length": str(file_size),
         "access-control-expose-headers": (
-            "content-type, accept-ranges, content-length, "
-            "content-range, content-encoding"
+            "content-type, accept-ranges, content-length, " "content-range, content-encoding"
         ),
     }
     start = 0
@@ -413,8 +407,9 @@ async def range_requests_response(
         headers["content-range"] = f"bytes {start}-{end}/{file_size}"
         status_code = status.HTTP_206_PARTIAL_CONTENT
 
+    f = aiofiles.open(file_path, mode="rb")
     return StreamingResponse(
-        send_bytes_range_requests(open(file_path, mode="rb"), start, end),
+        send_bytes_range_requests(f, start, end),
         headers=headers,
         status_code=status_code,
     )
